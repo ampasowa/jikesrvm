@@ -1,0 +1,9 @@
+/components/
+/eclipse/
+/target/
+/dist/
+/generated/
+/.settings/
+.DS_Store
+/.classpath
+/.project
