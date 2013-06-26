@@ -48,7 +48,7 @@ import org.vmmagic.unboxed.Word;
    * in the headers of object (or other sub-class scheme), and a single
    * mark bit per block.
    */
-  public static final boolean HEADER_MARK_BITS = VM.config.HEADER_MARK_BITS;
+  public static final boolean HEADER_MARK_BITS = VM.config.MC_HEADER_MARK_BITS;
 
   private static final int OBJECT_LIVE_SHIFT = LOG_MIN_ALIGNMENT; // 4 byte resolution
   private static final int LOG_BIT_COVERAGE = OBJECT_LIVE_SHIFT;

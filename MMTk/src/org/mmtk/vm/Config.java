@@ -22,15 +22,22 @@ public class Config {
   /** Mark bit in the header or on the side ? */
   public final boolean HEADER_MARK_BITS;
 
+  /** MarkCompactSpace mark bit in the header or on the side ? */
+  public final boolean MC_HEADER_MARK_BITS;
+
   Config(BuildTimeConfig config) {
     ACTIVE_PLAN            = config.getPlanName();
     HEADER_MARK_BITS        = config.getBooleanProperty("mmtk.headerMarkBit",true);
+    MC_HEADER_MARK_BITS     = config.getBooleanProperty("mmtk.mcHeaderMarkBit",true);
   }
 
   public void printConfig() {
     Log.writeln("================ MMTk Configuration ================");
     Log.write("plan = "); Log.writeln(ACTIVE_PLAN);
     Log.write("HEADER_MARK_BITS = ");  Log.writeln(HEADER_MARK_BITS);
+    if (ACTIVE_PLAN.equals("org.mmtk.plan.markcompact.MC")) {
+      Log.write("MC_HEADER_MARK_BITS = ");  Log.writeln(MC_HEADER_MARK_BITS);
+    }
     Log.writeln("====================================================");
   }
 
@@ -38,6 +45,9 @@ public class Config {
     Log.writeln("<config>");
     Xml.configItem("plan",ACTIVE_PLAN);
     Xml.configItem("header-mark-bit",HEADER_MARK_BITS);
+    if (ACTIVE_PLAN.equals("org.mmtk.plan.markcompact.MC")) {
+      Xml.configItem("mc-header-mark-bit",MC_HEADER_MARK_BITS);
+    }
     Log.writeln("</config>");
   }
 }
