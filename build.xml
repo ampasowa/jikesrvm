@@ -19,14 +19,15 @@
   <import file="build/base.xml"/>
   <import file="build/tasks.xml"/>
 
-  <property name="config.mmtk" value="default"/>
   <property name="config.file" location="${jikesrvm.dir}/build/configs/${config.name}.properties"/>
-  <property name="mmtk.properties" location="${jikesrvm.dir}/build/mmtk/${config.mmtk}.properties"/>
-  <property name="default.mmtk.properties" location="${jikesrvm.dir}/build/mmtk/default.properties"/>
 
   <!-- configuration data -->
   <property file="${config.file}"/>
   <property file="${target.file}"/>
+
+  <property name="config.mmtk" value="default"/>
+  <property name="mmtk.properties" location="${jikesrvm.dir}/build/mmtk/${config.mmtk}.properties"/>
+  <property name="default.mmtk.properties" location="${jikesrvm.dir}/build/mmtk/default.properties"/>
 
   <!-- default configuration values. May have already been set by above tasks -->
   <property file="${jikesrvm.dir}/build/configs/config.properties.defaults"/>
