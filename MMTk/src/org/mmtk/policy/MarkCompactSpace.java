@@ -481,7 +481,7 @@ import org.vmmagic.unboxed.Word;
    */
   @Inline
   protected static boolean liveBitSet(ObjectReference object) {
-    return liveBitSet(VM.objectModel.refToAddress(object));
+    return liveBitSet(VM.objectModel.objectStartRef(object));
   }
 
   /**
@@ -505,7 +505,7 @@ import org.vmmagic.unboxed.Word;
    */
   @Inline
   protected static void clearLiveBit(ObjectReference object) {
-    clearLiveBit(VM.objectModel.refToAddress(object));
+    clearLiveBit(VM.objectModel.objectStartRef(object));
   }
 
   /**
