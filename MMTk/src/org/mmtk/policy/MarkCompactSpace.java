@@ -100,7 +100,7 @@ import org.vmmagic.unboxed.Word;
     super(name, true, false, true, vmRequest);
     int totalMetadata = 0;
     if (!HEADER_MARK_BITS) {
-      totalMetadata += META_DATA_PAGES_PER_CHUNK;
+      totalMetadata += (META_DATA_PAGES_PER_CHUNK * 2);
     }
     if (vmRequest.isDiscontiguous()) {
       pr = new FreeListPageResource(this, totalMetadata);
@@ -171,7 +171,7 @@ import org.vmmagic.unboxed.Word;
     if (HEADER_MARK_BITS)
       initiallyUnmarked = testAndMark(object);
     else
-      initiallyUnmarked = testAndSetLiveBit(object);
+      initiallyUnmarked = testAndSetLiveBits(object);
 
     if (initiallyUnmarked) {
       trace.processNode(object);
@@ -203,7 +203,7 @@ import org.vmmagic.unboxed.Word;
     if (HEADER_MARK_BITS)
       initiallyMarked = testAndClearMark(object);
     else
-      initiallyMarked = testAndClearLiveBit(object);
+      initiallyMarked = testAndClearLiveBits(object);
 
     if (initiallyMarked) {
       trace.processNode(object);
@@ -298,7 +298,7 @@ import org.vmmagic.unboxed.Word;
       Word markBit = oldValue.and(GC_MARK_BIT_MASK);
       return (!markBit.isZero());
     } else {
-      return liveBitSet(object);
+      return liveBitsSet(object);
     }
   }
 
@@ -433,6 +433,63 @@ import org.vmmagic.unboxed.Word;
   }
 
   /**
+   * Atomically set the live bits for a given object
+   * These correspond to the first and last words of the object
+   *
+   * @param object The object whose live bits are to be set.
+   * @return {@code true} if the bits were changed to true.
+   */
+  @Inline
+  public static boolean testAndSetLiveBits(ObjectReference object) {
+    // TODO: Review this
+    // this may not be adequate -- might actually combine both updates into
+    // an atomic operation, rather than separately atomically update each
+    Address objectStartAddress = VM.objectModel.objectStartRef(object);
+    Address objectEndAddress = getObjectEndAddress(object);
+
+    //printObjectMarkState("before", object);
+
+    boolean objectStartUpdated = updateLiveBit(objectStartAddress, true, true);
+    boolean objectEndUpdated = updateLiveBit(objectEndAddress, true, true);
+
+    int objectSize = VM.objectModel.getCurrentSize(object);
+    int objectSizeWhenCopied = VM.objectModel.getSizeWhenCopied(object);
+    int bitmapSize;
+
+    if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(objectSizeWhenCopied >= objectSize);
+    if (objectSizeWhenCopied > objectSize) {
+      updateHashBit(objectStartAddress, true, true);
+      bitmapSize = getObjectSizeFromBitmap(object);
+      Log.write("Setting hash bit for object: "); Log.write(object);
+      Log.write(". ActualSize: "); Log.write(objectSize);
+      Log.write(". SizeWhenCopied: "); Log.write(objectSizeWhenCopied);
+      Log.write(". BitmapSize: "); Log.writeln(bitmapSize);
+
+      if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(objectSizeWhenCopied == bitmapSize);
+    } else {
+      updateHashBit(objectStartAddress, false, true);
+      bitmapSize = getObjectSizeFromBitmap(object);
+      Log.write("Not setting hash bit for object: "); Log.write(object);
+      Log.write(". ActualSize: "); Log.write(objectSize);
+      Log.write(". SizeWhenCopied: "); Log.write(objectSizeWhenCopied);
+      Log.write(". BitmapSize: "); Log.writeln(bitmapSize);
+      if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(objectSize == bitmapSize);
+    }
+
+    //printObjectMarkState("after", object);
+
+    if (objectStartUpdated != objectEndUpdated) {
+      Log.write("Object: "); Log.write(object);
+      Log.write(". start updated: "); Log.write(objectStartUpdated);
+      Log.write(". end updated: "); Log.writeln(objectEndUpdated);
+    }
+
+    if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(objectStartUpdated == objectEndUpdated);
+    return objectStartUpdated && objectEndUpdated;
+
+  }
+
+  /**
    * Atomically clear the live bit for a given object
    *
    * @param object The object whose live bit is to be cleared.
@@ -441,6 +498,27 @@ import org.vmmagic.unboxed.Word;
   @Inline
   public static boolean testAndClearLiveBit(ObjectReference object) {
     return updateLiveBit(VM.objectModel.objectStartRef(object), false, true);
+  }
+
+  /**
+   * Atomically clear the live bits for a given object
+   *
+   * @param object The object whose live bits are to be cleared.
+   * @return {@code true} if the bits were changed to false.
+   */
+  @Inline
+  public static boolean testAndClearLiveBits(ObjectReference object) {
+    // TODO: Review this
+    // this may not be adequate -- might actually combine both updates into
+    // an atomic operation, rather than separately atomically update each
+    Address objectStartAddress = VM.objectModel.objectStartRef(object);
+    Address objectEndAddress = getObjectEndAddress(object);
+
+    boolean objectStartUpdated = updateLiveBit(objectStartAddress, false, true);
+    boolean objectEndUpdated = updateLiveBit(objectEndAddress, false, true);
+
+    if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(objectStartUpdated == objectEndUpdated);
+    return objectStartUpdated && objectEndUpdated;
   }
 
   /**
@@ -475,6 +553,75 @@ import org.vmmagic.unboxed.Word;
   }
 
   /**
+   * Set the hash bit for a given address
+   *
+   * @param address The address whose hash bit is to be set.
+   * @param set {@code true} if the bit is to be set, as opposed to cleared
+   * @param atomic {@code true} if we want to perform this operation atomically
+   *
+   * @return {@code true} if the bit was changed.
+   */
+  @Inline
+  private static boolean updateHashBit(Address address, boolean set, boolean atomic) {
+    Word oldValue, newValue;
+    Address liveWord = getLiveWordAddress(address);
+    Address hashWord = liveWord.plus(METADATA_BYTES_PER_CHUNK);
+
+    Word mask = getMask(address, true);
+    if (atomic) {
+      do {
+        oldValue = hashWord.prepareWord();
+        newValue = (set) ? oldValue.or(mask) : oldValue.and(mask.not());
+      } while (!hashWord.attempt(oldValue, newValue));
+    } else {
+      oldValue = hashWord.loadWord();
+      hashWord.store(set ? oldValue.or(mask) : oldValue.and(mask.not()));
+    }
+    if (set) {
+      return oldValue.and(mask).NE(mask);
+    } else {
+      return oldValue.or(mask.not()).NE(mask.not());
+    }
+  }
+
+  /**
+   * Calculate the size of an object using its mark bits
+   * @param object The Object
+   */
+  public static int getObjectSizeFromBitmap(ObjectReference object) {
+    Address objectStartAddress = VM.objectModel.objectStartRef(object);
+
+    Address actualObjAddress = objectStartAddress.plus(4);
+    Address liveWordAddress = getLiveWordAddress(actualObjAddress);
+    Word mask = getMask(actualObjAddress, true);
+
+    Address metadataStart = EmbeddedMetaData.getMetaDataBase(actualObjAddress);
+    Address metadataEnd = metadataStart.plus(METADATA_BYTES_PER_CHUNK);
+
+    boolean isLive = false;
+    int count = 1;
+
+    while (!isLive) {
+      if (VM.VERIFY_ASSERTIONS)
+        VM.assertions._assert(liveWordAddress.LE(metadataEnd));
+
+      Word liveWord = liveWordAddress.loadWord();
+      isLive = liveWord.and(mask).EQ(mask);
+
+      mask = mask.lsh(1);
+      if (mask.EQ(Word.zero())) {
+        mask = Word.one();
+        liveWordAddress = liveWordAddress.plus(4);
+      }
+
+      count++;
+    }
+
+    return (count << 2) + (hashBitSet(objectStartAddress) ? 4 : 0);
+    //return VM.objectModel.getSizeWhenCopied(object);
+  }
+
+  /**
    * Test the live bit for a given object
    *
    * @param object The object whose live bit is to be set.
@@ -482,6 +629,33 @@ import org.vmmagic.unboxed.Word;
   @Inline
   protected static boolean liveBitSet(ObjectReference object) {
     return liveBitSet(VM.objectModel.objectStartRef(object));
+  }
+
+  /**
+   * Test the hash bit for a given object
+   *
+   * @param object The object whose hash bit is to be tested.
+   */
+  @Inline
+  protected static boolean hashBitSet(ObjectReference object) {
+    return hashBitSet(VM.objectModel.objectStartRef(object));
+  }
+
+  /**
+   * Test the live bits (first and last) for a given object
+   *
+   * @param object The object
+   */
+  @Inline
+  protected static boolean liveBitsSet(ObjectReference object) {
+    Address objectStartAddress = VM.objectModel.objectStartRef(object);
+    Address objectEndAddress = getObjectEndAddress(object);
+
+    boolean startSet = liveBitSet(objectStartAddress);
+    boolean endSet = liveBitSet(objectEndAddress);
+
+    if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(startSet == endSet);
+    return startSet && endSet;
   }
 
   /**
@@ -495,6 +669,21 @@ import org.vmmagic.unboxed.Word;
     Address liveWord = getLiveWordAddress(address);
     Word mask = getMask(address, true);
     Word value = liveWord.loadWord();
+    return value.and(mask).EQ(mask);
+  }
+
+  /**
+   * Test the hash bit for a given address
+   *
+   * @param address The address whose hash bit is to be tested.
+   * @return {@code true} if the hash bit for this address is set.
+   */
+  @Inline
+  protected static boolean hashBitSet(Address address) {
+    Address liveWord = getLiveWordAddress(address);
+    Address hashWord = liveWord.plus(METADATA_BYTES_PER_CHUNK);
+    Word mask = getMask(address, true);
+    Word value = hashWord.loadWord();
     return value.and(mask).EQ(mask);
   }
 
@@ -544,5 +733,22 @@ import org.vmmagic.unboxed.Word;
     Address rtn = EmbeddedMetaData.getMetaDataBase(address);
     return rtn.plus(EmbeddedMetaData.getMetaDataOffset(address,
         LOG_LIVE_COVERAGE, LOG_BYTES_IN_WORD));
+  }
+
+  private static Address getObjectEndAddress(ObjectReference object) {
+    int size = VM.objectModel.getCurrentSize(object);
+    return VM.objectModel.objectStartRef(object).plus(size).minus(1);
+  }
+
+  private static void printObjectMarkState(String state, ObjectReference object) {
+    Address objectStartAddress = VM.objectModel.objectStartRef(object);
+    Address objectEndAddress = getObjectEndAddress(object);
+
+    Log.write("["); Log.write(state); Log.write("] ");
+    Log.write("\tObject: "); Log.write(object);
+    Log.write(". Start: "); Log.write(objectStartAddress);
+    Log.write(" ("); Log.write(liveBitSet(objectStartAddress)); Log.write(")");
+    Log.write(". End: "); Log.write(objectEndAddress);
+    Log.write(" ("); Log.write(liveBitSet(objectEndAddress)); Log.writeln(")");
   }
 }
