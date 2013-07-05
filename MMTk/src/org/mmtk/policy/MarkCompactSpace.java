@@ -100,7 +100,7 @@ import org.vmmagic.unboxed.Word;
     super(name, true, false, true, vmRequest);
     int totalMetadata = 0;
     if (!HEADER_MARK_BITS) {
-      totalMetadata += (META_DATA_PAGES_PER_CHUNK * 2);
+      totalMetadata += (META_DATA_PAGES_PER_CHUNK * 2); // one for live bitmap, one for hash bitmap
     }
     if (vmRequest.isDiscontiguous()) {
       pr = new FreeListPageResource(this, totalMetadata);
@@ -441,13 +441,8 @@ import org.vmmagic.unboxed.Word;
    */
   @Inline
   public static boolean testAndSetLiveBits(ObjectReference object) {
-    // TODO: Review this
-    // this may not be adequate -- might actually combine both updates into
-    // an atomic operation, rather than separately atomically update each
     Address objectStartAddress = VM.objectModel.objectStartRef(object);
     Address objectEndAddress = getObjectEndAddress(object);
-
-    //printObjectMarkState("before", object);
 
     boolean objectStartUpdated = updateLiveBit(objectStartAddress, true, true);
     boolean objectEndUpdated = updateLiveBit(objectEndAddress, true, true);
@@ -456,37 +451,22 @@ import org.vmmagic.unboxed.Word;
     int objectSizeWhenCopied = VM.objectModel.getSizeWhenCopied(object);
     int bitmapSize;
 
-    if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(objectSizeWhenCopied >= objectSize);
     if (objectSizeWhenCopied > objectSize) {
       updateHashBit(objectStartAddress, true, true);
       bitmapSize = getObjectSizeFromBitmap(object);
-      Log.write("Setting hash bit for object: "); Log.write(object);
-      Log.write(". ActualSize: "); Log.write(objectSize);
-      Log.write(". SizeWhenCopied: "); Log.write(objectSizeWhenCopied);
-      Log.write(". BitmapSize: "); Log.writeln(bitmapSize);
-
-      if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(objectSizeWhenCopied == bitmapSize);
+      if (VM.VERIFY_ASSERTIONS)
+        VM.assertions._assert(objectSizeWhenCopied == bitmapSize);
     } else {
       updateHashBit(objectStartAddress, false, true);
       bitmapSize = getObjectSizeFromBitmap(object);
-      Log.write("Not setting hash bit for object: "); Log.write(object);
-      Log.write(". ActualSize: "); Log.write(objectSize);
-      Log.write(". SizeWhenCopied: "); Log.write(objectSizeWhenCopied);
-      Log.write(". BitmapSize: "); Log.writeln(bitmapSize);
-      if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(objectSize == bitmapSize);
+      if (VM.VERIFY_ASSERTIONS)
+        VM.assertions._assert(objectSize == bitmapSize);
     }
 
-    //printObjectMarkState("after", object);
+    if (VM.VERIFY_ASSERTIONS)
+      VM.assertions._assert(objectStartUpdated == objectEndUpdated);
 
-    if (objectStartUpdated != objectEndUpdated) {
-      Log.write("Object: "); Log.write(object);
-      Log.write(". start updated: "); Log.write(objectStartUpdated);
-      Log.write(". end updated: "); Log.writeln(objectEndUpdated);
-    }
-
-    if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(objectStartUpdated == objectEndUpdated);
     return objectStartUpdated && objectEndUpdated;
-
   }
 
   /**
@@ -508,16 +488,15 @@ import org.vmmagic.unboxed.Word;
    */
   @Inline
   public static boolean testAndClearLiveBits(ObjectReference object) {
-    // TODO: Review this
-    // this may not be adequate -- might actually combine both updates into
-    // an atomic operation, rather than separately atomically update each
     Address objectStartAddress = VM.objectModel.objectStartRef(object);
     Address objectEndAddress = getObjectEndAddress(object);
 
     boolean objectStartUpdated = updateLiveBit(objectStartAddress, false, true);
     boolean objectEndUpdated = updateLiveBit(objectEndAddress, false, true);
 
-    if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(objectStartUpdated == objectEndUpdated);
+    if (VM.VERIFY_ASSERTIONS)
+      VM.assertions._assert(objectStartUpdated == objectEndUpdated);
+
     return objectStartUpdated && objectEndUpdated;
   }
 
@@ -591,7 +570,7 @@ import org.vmmagic.unboxed.Word;
   public static int getObjectSizeFromBitmap(ObjectReference object) {
     Address objectStartAddress = VM.objectModel.objectStartRef(object);
 
-    Address actualObjAddress = objectStartAddress.plus(4);
+    Address actualObjAddress = objectStartAddress.plus(BYTES_IN_WORD);
     Address liveWordAddress = getLiveWordAddress(actualObjAddress);
     Word mask = getMask(actualObjAddress, true);
 
@@ -611,14 +590,14 @@ import org.vmmagic.unboxed.Word;
       mask = mask.lsh(1);
       if (mask.EQ(Word.zero())) {
         mask = Word.one();
-        liveWordAddress = liveWordAddress.plus(4);
+        liveWordAddress = liveWordAddress.plus(BYTES_IN_WORD);
       }
 
       count++;
     }
 
-    return (count << 2) + (hashBitSet(objectStartAddress) ? 4 : 0);
-    //return VM.objectModel.getSizeWhenCopied(object);
+    int hashCodeBytes = hashBitSet(objectStartAddress) ? BYTES_IN_WORD : 0;
+    return (count << LOG_BYTES_IN_WORD) + hashCodeBytes;
   }
 
   /**
@@ -654,7 +633,9 @@ import org.vmmagic.unboxed.Word;
     boolean startSet = liveBitSet(objectStartAddress);
     boolean endSet = liveBitSet(objectEndAddress);
 
-    if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(startSet == endSet);
+    if (VM.VERIFY_ASSERTIONS)
+      VM.assertions._assert(startSet == endSet);
+
     return startSet && endSet;
   }
 
@@ -737,18 +718,7 @@ import org.vmmagic.unboxed.Word;
 
   private static Address getObjectEndAddress(ObjectReference object) {
     int size = VM.objectModel.getCurrentSize(object);
-    return VM.objectModel.objectStartRef(object).plus(size).minus(1);
+    return VM.objectModel.objectStartRef(object).plus(size).minus(BYTES_IN_WORD);
   }
 
-  private static void printObjectMarkState(String state, ObjectReference object) {
-    Address objectStartAddress = VM.objectModel.objectStartRef(object);
-    Address objectEndAddress = getObjectEndAddress(object);
-
-    Log.write("["); Log.write(state); Log.write("] ");
-    Log.write("\tObject: "); Log.write(object);
-    Log.write(". Start: "); Log.write(objectStartAddress);
-    Log.write(" ("); Log.write(liveBitSet(objectStartAddress)); Log.write(")");
-    Log.write(". End: "); Log.write(objectEndAddress);
-    Log.write(" ("); Log.write(liveBitSet(objectEndAddress)); Log.writeln(")");
-  }
 }
