@@ -449,9 +449,7 @@ public final class MarkCompactCollector {
           if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(MarkCompactSpace.getForwardingPointer(current).isNull());
 
           // Fake - allocate it.
-          int size = VM.objectModel.getSizeWhenCopied(current);
-          int bitmapSize = MarkCompactSpace.getObjectSizeFromBitmap(current);
-          if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(size == bitmapSize);
+          int size = MarkCompactSpace.getObjectSizeFromBitmap(current);
           int align = VM.objectModel.getAlignWhenCopied(current);
           int offset = VM.objectModel.getAlignOffsetWhenCopied(current);
           // Move to the (aligned) start of the next object
