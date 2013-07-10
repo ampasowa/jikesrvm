@@ -445,7 +445,7 @@ import org.vmmagic.unboxed.Word;
     Address objectEndAddress = getObjectEndAddress(object);
 
     boolean objectStartUpdated = updateLiveBit(objectStartAddress, true, true);
-    boolean objectEndUpdated = updateLiveBit(objectEndAddress, true, true);
+    updateLiveBit(objectEndAddress, true, true);
 
     int objectSize = VM.objectModel.getCurrentSize(object);
     int objectSizeWhenCopied = VM.objectModel.getSizeWhenCopied(object);
@@ -463,10 +463,12 @@ import org.vmmagic.unboxed.Word;
         VM.assertions._assert(objectSize == bitmapSize);
     }
 
-    if (VM.VERIFY_ASSERTIONS)
-      VM.assertions._assert(objectStartUpdated == objectEndUpdated);
+    if (VM.VERIFY_ASSERTIONS) {
+      VM.assertions._assert(liveBitSet(objectStartAddress));
+      VM.assertions._assert(liveBitSet(objectEndAddress));
+    }
 
-    return objectStartUpdated && objectEndUpdated;
+    return objectStartUpdated;
   }
 
   /**
@@ -492,12 +494,14 @@ import org.vmmagic.unboxed.Word;
     Address objectEndAddress = getObjectEndAddress(object);
 
     boolean objectStartUpdated = updateLiveBit(objectStartAddress, false, true);
-    boolean objectEndUpdated = updateLiveBit(objectEndAddress, false, true);
+    updateLiveBit(objectEndAddress, false, true);
 
-    if (VM.VERIFY_ASSERTIONS)
-      VM.assertions._assert(objectStartUpdated == objectEndUpdated);
+    if (VM.VERIFY_ASSERTIONS) {
+      VM.assertions._assert(!liveBitSet(objectStartAddress));
+      VM.assertions._assert(!liveBitSet(objectEndAddress));
+    }
 
-    return objectStartUpdated && objectEndUpdated;
+    return objectStartUpdated;
   }
 
   /**
