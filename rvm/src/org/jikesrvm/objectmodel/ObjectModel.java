@@ -359,6 +359,27 @@ public class ObjectModel implements JavaHeaderConstants, SizeConstants {
   }
 
   /**
+   * is the object not hashed?
+   */
+  public static boolean isNotHashed(Object object) {
+    return JavaHeader.isNotHashed(object);
+  }
+
+  /**
+   * has the object been hashed?
+   */
+  public static boolean isHashed(Object object) {
+    return JavaHeader.isHashed(object);
+  }
+
+  /**
+   * has the object been moved since it was hashed?
+   */
+  public static boolean isHashedAndMoved(Object object) {
+    return JavaHeader.isHashedAndMoved(object);
+  }
+
+  /**
    * Map from the object ref to the lowest address of the storage
    * associated with the object
    */

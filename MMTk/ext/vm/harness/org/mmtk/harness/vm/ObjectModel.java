@@ -14,10 +14,10 @@ package org.mmtk.harness.vm;
 
 import java.io.PrintStream;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.Collection;
 
 import org.mmtk.harness.Mutator;
 import org.mmtk.harness.lang.Trace;
@@ -30,7 +30,10 @@ import org.mmtk.plan.Plan;
 import org.mmtk.policy.Space;
 import org.mmtk.utility.alloc.Allocator;
 import org.vmmagic.pragma.Uninterruptible;
-import org.vmmagic.unboxed.*;
+import org.vmmagic.unboxed.Address;
+import org.vmmagic.unboxed.ObjectReference;
+import org.vmmagic.unboxed.Offset;
+import org.vmmagic.unboxed.Word;
 import org.vmmagic.unboxed.harness.ArchitecturalWord;
 import org.vmmagic.unboxed.harness.MemoryConstants;
 import org.vmmagic.unboxed.harness.SimulatedMemory;
@@ -701,5 +704,20 @@ public final class ObjectModel extends org.mmtk.vm.ObjectModel {
    */
   public static String addressAndSpaceString(Address addr) {
     return String.format("%s/%s",addr, Space.getSpaceForAddress(addr).getName());
+  }
+
+  @Override
+  public boolean isNotHashed(ObjectReference object) {
+    return (object.toAddress().loadInt(STATUS_OFFSET) & HASHED_AND_MOVED) == 0;
+  }
+
+  @Override
+  public boolean isHashed(ObjectReference object) {
+    return (object.toAddress().loadInt(STATUS_OFFSET) & HASHED) == HASHED;
+  }
+
+  @Override
+  public boolean isHashedAndMoved(ObjectReference object) {
+    return (object.toAddress().loadInt(STATUS_OFFSET) & HASHED_AND_MOVED) == HASHED_AND_MOVED;
   }
 }

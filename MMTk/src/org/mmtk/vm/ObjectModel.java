@@ -13,7 +13,10 @@
 package org.mmtk.vm;
 
 import org.vmmagic.pragma.Uninterruptible;
-import org.vmmagic.unboxed.*;
+import org.vmmagic.unboxed.Address;
+import org.vmmagic.unboxed.ObjectReference;
+import org.vmmagic.unboxed.Offset;
+import org.vmmagic.unboxed.Word;
 
 @Uninterruptible
 public abstract class ObjectModel {
@@ -122,6 +125,27 @@ public abstract class ObjectModel {
    * @param object address of the object
    */
   public abstract boolean isArray(ObjectReference object);
+
+  /**
+   * Is the passed object not hashed?
+   *
+   * @param object address of the object
+   */
+  public abstract boolean isNotHashed(ObjectReference object);
+
+  /**
+   * Has the passed object been hashed?
+   *
+   * @param object address of the object
+   */
+  public abstract boolean isHashed(ObjectReference object);
+
+  /**
+   * Has the passed object been moved since it was initially hashed?
+   *
+   * @param object address of the object
+   */
+  public abstract boolean isHashedAndMoved(ObjectReference object);
 
   /**
    * Is the passed object a primitive array?

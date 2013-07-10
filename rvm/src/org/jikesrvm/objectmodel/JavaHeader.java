@@ -266,6 +266,30 @@ public class JavaHeader implements JavaHeaderConstants {
   }
 
   /**
+   * is the object not hashed?
+   */
+  public static boolean isNotHashed(Object obj) {
+    Word hashState = Magic.getWordAtOffset(obj, STATUS_OFFSET).and(HASH_STATE_MASK);
+    return hashState.EQ(HASH_STATE_UNHASHED);
+  }
+
+  /**
+   * has the object been hashed?
+   */
+  public static boolean isHashed(Object obj) {
+    Word hashState = Magic.getWordAtOffset(obj, STATUS_OFFSET).and(HASH_STATE_MASK);
+    return hashState.EQ(HASH_STATE_HASHED);
+  }
+
+  /**
+   * has the object been moved since it was hashed?
+   */
+  public static boolean isHashedAndMoved(Object obj) {
+    Word hashState = Magic.getWordAtOffset(obj, STATUS_OFFSET).and(HASH_STATE_MASK);
+    return hashState.EQ(HASH_STATE_HASHED_AND_MOVED);
+  }
+
+  /**
    * Map from the object ref to the lowest address of the storage
    * associated with the object
    */

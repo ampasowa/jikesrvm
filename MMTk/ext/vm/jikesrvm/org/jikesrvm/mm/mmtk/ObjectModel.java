@@ -297,5 +297,20 @@ import org.vmmagic.pragma.*;
   public void dumpObject(ObjectReference object) {
     DebugUtil.dumpRef(object);
   }
+
+  @Override
+  public boolean isNotHashed(ObjectReference object) {
+    return org.jikesrvm.objectmodel.ObjectModel.isNotHashed(object.toObject());
+  }
+
+  @Override
+  public boolean isHashed(ObjectReference object) {
+    return org.jikesrvm.objectmodel.ObjectModel.isHashed(object.toObject());
+  }
+
+  @Override
+  public boolean isHashedAndMoved(ObjectReference object) {
+    return org.jikesrvm.objectmodel.ObjectModel.isHashedAndMoved(object.toObject());
+  }
 }
 
