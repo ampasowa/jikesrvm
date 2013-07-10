@@ -20,6 +20,7 @@ import org.mmtk.utility.Log;
 import org.mmtk.utility.alloc.BumpPointer;
 import org.mmtk.utility.alloc.EmbeddedMetaData;
 import org.mmtk.utility.heap.FreeListPageResource;
+import org.mmtk.utility.heap.Map;
 import org.mmtk.utility.heap.VMRequest;
 import org.mmtk.vm.Lock;
 import org.mmtk.vm.VM;
@@ -56,9 +57,11 @@ import org.vmmagic.unboxed.Word;
   private static final Word WORD_SHIFT_MASK = Word.one().lsh(LOG_BITS_IN_WORD).minus(Extent.one());
 
   public static final int LOG_LIVE_BYTES_PER_CHUNK = LOG_BYTES_IN_CHUNK - LOG_LIVE_COVERAGE;
-  public static final int LIVE_BYTES_PER_CHUNK = 1 << LOG_LIVE_BYTES_PER_CHUNK;
-  public static final int METADATA_BYTES_PER_CHUNK = LIVE_BYTES_PER_CHUNK;
-  protected static final int META_DATA_PAGES_PER_CHUNK = Conversions.bytesToPages(Extent.fromIntSignExtend(METADATA_BYTES_PER_CHUNK));
+  public static final int LIVE_BYTES_PER_CHUNK = 1 << LOG_LIVE_BYTES_PER_CHUNK; // Live bitmap
+  public static final int HASH_BYTES_PER_CHUNK = LIVE_BYTES_PER_CHUNK; // Hash bitmap -- same space requirements as live bitmap
+  public static final int META_DATA_BYTES_PER_CHUNK = LIVE_BYTES_PER_CHUNK + HASH_BYTES_PER_CHUNK;
+  public static final Extent META_DATA_EXTENT_PER_CHUNK = Extent.fromIntSignExtend(META_DATA_BYTES_PER_CHUNK);
+  protected static final int META_DATA_PAGES_PER_CHUNK = Conversions.bytesToPages(META_DATA_EXTENT_PER_CHUNK);
 
   /**
    *
@@ -100,7 +103,7 @@ import org.vmmagic.unboxed.Word;
     super(name, true, false, true, vmRequest);
     int totalMetadata = 0;
     if (!HEADER_MARK_BITS) {
-      totalMetadata += (META_DATA_PAGES_PER_CHUNK * 2); // one for live bitmap, one for hash bitmap
+      totalMetadata += (META_DATA_PAGES_PER_CHUNK);
     }
     if (vmRequest.isDiscontiguous()) {
       pr = new FreeListPageResource(this, totalMetadata);
@@ -110,16 +113,25 @@ import org.vmmagic.unboxed.Word;
   }
 
   /**
-   * Prepare for a collection
+   * Prepare for a new collection increment.
+   *
+   * @param clearBitmaps true if we should clear the live and hash bitmaps
+   *        within the metadata area
    */
-  public void prepare() {
+  public void prepare(boolean clearBitmaps) {
+    if (!HEADER_MARK_BITS && clearBitmaps)
+      zeroLiveBits();
   }
 
   /**
    * Release after a collection
+   *
+   * * @param clearBitmaps true if we should clear the live and hash bitmaps
+   *        within the metadata area
    */
-  public void release() {
-    // nothing to do
+  public void release(boolean clearBitmaps) {
+    if (!HEADER_MARK_BITS && clearBitmaps)
+      zeroLiveBits();
   }
 
 
@@ -548,7 +560,7 @@ import org.vmmagic.unboxed.Word;
   private static boolean updateHashBit(Address address, boolean set, boolean atomic) {
     Word oldValue, newValue;
     Address liveWord = getLiveWordAddress(address);
-    Address hashWord = liveWord.plus(METADATA_BYTES_PER_CHUNK);
+    Address hashWord = liveWord.plus(LIVE_BYTES_PER_CHUNK); // advance by extent of live bitmap
 
     Word mask = getMask(address, true);
     if (atomic) {
@@ -579,7 +591,7 @@ import org.vmmagic.unboxed.Word;
     Word mask = getMask(actualObjAddress, true);
 
     Address metadataStart = EmbeddedMetaData.getMetaDataBase(actualObjAddress);
-    Address metadataEnd = metadataStart.plus(METADATA_BYTES_PER_CHUNK);
+    Address metadataEnd = metadataStart.plus(LIVE_BYTES_PER_CHUNK);
 
     boolean isLive = false;
     int count = 1;
@@ -666,7 +678,7 @@ import org.vmmagic.unboxed.Word;
   @Inline
   protected static boolean hashBitSet(Address address) {
     Address liveWord = getLiveWordAddress(address);
-    Address hashWord = liveWord.plus(METADATA_BYTES_PER_CHUNK);
+    Address hashWord = liveWord.plus(LIVE_BYTES_PER_CHUNK); // advance by extent of live bitmap
     Word mask = getMask(address, true);
     Word value = hashWord.loadWord();
     return value.and(mask).EQ(mask);
@@ -690,6 +702,23 @@ import org.vmmagic.unboxed.Word;
   @Inline
   protected static void clearLiveBit(Address address) {
     updateLiveBit(address, false, true);
+  }
+
+  protected void zeroLiveBits() {
+   if (contiguous) {
+      Address end = ((FreeListPageResource)pr).getHighWater();
+      Address cursor = start;
+      while (cursor.LT(end)) {
+        Address metadata = EmbeddedMetaData.getMetaDataBase(cursor);
+        VM.memory.zero(false, metadata, META_DATA_EXTENT_PER_CHUNK);
+        cursor = cursor.plus(EmbeddedMetaData.BYTES_IN_REGION);
+      }
+    } else {
+      for(Address cursor = headDiscontiguousRegion; !cursor.isZero(); cursor = Map.getNextContiguousRegion(cursor)) {
+        Address metadata = EmbeddedMetaData.getMetaDataBase(cursor);
+        VM.memory.zero(false, metadata, META_DATA_EXTENT_PER_CHUNK);
+      }
+    }
   }
 
   /**

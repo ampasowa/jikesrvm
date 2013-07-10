@@ -12,13 +12,17 @@
  */
 package org.mmtk.plan.markcompact;
 
-import org.mmtk.plan.*;
+import org.mmtk.plan.Phase;
+import org.mmtk.plan.StopTheWorld;
+import org.mmtk.plan.Trace;
+import org.mmtk.plan.TransitiveClosure;
 import org.mmtk.policy.MarkCompactSpace;
 import org.mmtk.policy.Space;
 import org.mmtk.utility.heap.VMRequest;
 import org.mmtk.utility.sanitychecker.SanityChecker;
-
-import org.vmmagic.pragma.*;
+import org.vmmagic.pragma.Inline;
+import org.vmmagic.pragma.Interruptible;
+import org.vmmagic.pragma.Uninterruptible;
 import org.vmmagic.unboxed.ObjectReference;
 
 /**
@@ -134,7 +138,7 @@ import org.vmmagic.unboxed.ObjectReference;
     if (phaseId == PREPARE) {
       super.collectionPhase(phaseId);
       markTrace.prepare();
-      mcSpace.prepare();
+      mcSpace.prepare(true);
       return;
     }
     if (phaseId == CLOSURE) {
@@ -143,7 +147,7 @@ import org.vmmagic.unboxed.ObjectReference;
     }
     if (phaseId == RELEASE) {
       markTrace.release();
-      mcSpace.release();
+      mcSpace.release(false);
       super.collectionPhase(phaseId);
       return;
     }
@@ -151,12 +155,12 @@ import org.vmmagic.unboxed.ObjectReference;
     if (phaseId == PREPARE_FORWARD) {
       super.collectionPhase(PREPARE);
       forwardTrace.prepare();
-      mcSpace.prepare();
+      mcSpace.prepare(false);
       return;
     }
     if (phaseId == RELEASE_FORWARD) {
       forwardTrace.release();
-      mcSpace.release();
+      mcSpace.release(true);
       super.collectionPhase(RELEASE);
       return;
     }
