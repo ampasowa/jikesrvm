@@ -13,6 +13,7 @@
 package org.mmtk.policy;
 
 import org.mmtk.plan.markcompact.MC;
+import org.mmtk.utility.Constants;
 import org.mmtk.utility.Log;
 import org.mmtk.utility.alloc.Allocator;
 import org.mmtk.utility.alloc.BumpPointer;
@@ -443,6 +444,7 @@ public final class MarkCompactCollector {
       /* Loop through the objects in the current 'from' region */
       while (fromCursor.hasMoreObjects()) {
         ObjectReference current = fromCursor.advanceToObject();
+        Address objectStartAddress = VM.objectModel.objectStartRef(current);
         fromCursor.advanceToObjectEnd(current);
 
         if (MarkCompactSpace.toBeCompacted(current)) {
@@ -455,12 +457,17 @@ public final class MarkCompactCollector {
           // Move to the (aligned) start of the next object
           toCursor.incTo(Allocator.alignAllocationNoFill(toCursor.get(), align, offset));
 
+          boolean objHashed = MarkCompactSpace.hashBitSet(current);
+          int reservedSize = size;
+          if (objHashed)
+            reservedSize += Constants.BYTES_IN_WORD;
+
           /*
            * If we're allocating into separate regions, and we've allocated beyond the end of the
            * current region, advance to the next one.  We always allocate into regions we have
            * scanned in this collector.
            */
-          if (!toCursor.sameRegion(fromCursor) && !toCursor.isAvailable(size)) {
+          if (!toCursor.sameRegion(fromCursor) && !toCursor.isAvailable(reservedSize)) {
             // The 'to' pointer always trails the 'from' pointer, guaranteeing that
             // there's a next region to advance to.
             toCursor.advanceToNextRegion();
@@ -471,10 +478,10 @@ public final class MarkCompactCollector {
           if (toCursor.sameRegion(fromCursor) && target.toAddress().GE(current.toAddress())) {
             // Don't move the object.
             MarkCompactSpace.setForwardingPointer(current, current);
-            toCursor.incTo(VM.objectModel.getObjectEndAddress(current));
+            toCursor.incTo(objectStartAddress.plus(size));
           } else {
             MarkCompactSpace.setForwardingPointer(current, target);
-            toCursor.inc(size);
+            toCursor.inc(reservedSize);
           }
         }
       }

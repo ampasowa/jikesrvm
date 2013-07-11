@@ -459,20 +459,10 @@ import org.vmmagic.unboxed.Word;
     boolean objectStartUpdated = updateLiveBit(objectStartAddress, true, true);
     updateLiveBit(objectEndAddress, true, true);
 
-    int objectSize = VM.objectModel.getCurrentSize(object);
-    int objectSizeWhenCopied = VM.objectModel.getSizeWhenCopied(object);
-    int bitmapSize;
-
-    if (objectSizeWhenCopied > objectSize) {
+    if (VM.objectModel.isHashed(object)) {
       updateHashBit(objectStartAddress, true, true);
-      bitmapSize = getObjectSizeFromBitmap(object);
-      if (VM.VERIFY_ASSERTIONS)
-        VM.assertions._assert(objectSizeWhenCopied == bitmapSize);
     } else {
       updateHashBit(objectStartAddress, false, true);
-      bitmapSize = getObjectSizeFromBitmap(object);
-      if (VM.VERIFY_ASSERTIONS)
-        VM.assertions._assert(objectSize == bitmapSize);
     }
 
     if (VM.VERIFY_ASSERTIONS) {
@@ -612,8 +602,7 @@ import org.vmmagic.unboxed.Word;
       count++;
     }
 
-    int hashCodeBytes = hashBitSet(objectStartAddress) ? BYTES_IN_WORD : 0;
-    return (count << LOG_BYTES_IN_WORD) + hashCodeBytes;
+    return (count << LOG_BYTES_IN_WORD);
   }
 
   /**
