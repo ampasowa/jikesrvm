@@ -59,7 +59,8 @@ import org.vmmagic.unboxed.Word;
   public static final int LOG_LIVE_BYTES_PER_CHUNK = LOG_BYTES_IN_CHUNK - LOG_LIVE_COVERAGE;
   public static final int LIVE_BYTES_PER_CHUNK = 1 << LOG_LIVE_BYTES_PER_CHUNK; // Live bitmap
   public static final int HASH_BYTES_PER_CHUNK = LIVE_BYTES_PER_CHUNK; // Hash bitmap -- same space requirements as live bitmap
-  public static final int META_DATA_BYTES_PER_CHUNK = LIVE_BYTES_PER_CHUNK + HASH_BYTES_PER_CHUNK;
+  public static final int ALIGNMENT_BYTES_PER_CHUNK = LIVE_BYTES_PER_CHUNK; // Alignment bitmap -- same space requirements as live bitmap
+  public static final int META_DATA_BYTES_PER_CHUNK = LIVE_BYTES_PER_CHUNK + HASH_BYTES_PER_CHUNK + ALIGNMENT_BYTES_PER_CHUNK;
   public static final Extent META_DATA_EXTENT_PER_CHUNK = Extent.fromIntSignExtend(META_DATA_BYTES_PER_CHUNK);
   protected static final int META_DATA_PAGES_PER_CHUNK = Conversions.bytesToPages(META_DATA_EXTENT_PER_CHUNK);
 
@@ -465,6 +466,12 @@ import org.vmmagic.unboxed.Word;
       updateHashBit(objectStartAddress, false, true);
     }
 
+    if (VM.objectModel.getAlignWhenCopied(object) == (2 * Constants.BYTES_IN_WORD)) {
+      updateAlignmentBit(objectStartAddress, true, true);
+    } else {
+      updateAlignmentBit(objectStartAddress, false, true);
+    }
+
     if (VM.VERIFY_ASSERTIONS) {
       VM.assertions._assert(liveBitSet(objectStartAddress));
       VM.assertions._assert(liveBitSet(objectEndAddress));
@@ -570,6 +577,38 @@ import org.vmmagic.unboxed.Word;
   }
 
   /**
+   * Set the double-alignment bit for a given address
+   *
+   * @param address The address whose alignment bit is to be set.
+   * @param set {@code true} if the bit is to be set, as opposed to cleared
+   * @param atomic {@code true} if we want to perform this operation atomically
+   *
+   * @return {@code true} if the bit was changed.
+   */
+  @Inline
+  private static boolean updateAlignmentBit(Address address, boolean set, boolean atomic) {
+    Word oldValue, newValue;
+    Address liveWord = getLiveWordAddress(address);
+    Address hashWord = liveWord.plus(LIVE_BYTES_PER_CHUNK + ALIGNMENT_BYTES_PER_CHUNK); // advance by extent of live+alignment bitmap
+
+    Word mask = getMask(address, true);
+    if (atomic) {
+      do {
+        oldValue = hashWord.prepareWord();
+        newValue = (set) ? oldValue.or(mask) : oldValue.and(mask.not());
+      } while (!hashWord.attempt(oldValue, newValue));
+    } else {
+      oldValue = hashWord.loadWord();
+      hashWord.store(set ? oldValue.or(mask) : oldValue.and(mask.not()));
+    }
+    if (set) {
+      return oldValue.and(mask).NE(mask);
+    } else {
+      return oldValue.or(mask.not()).NE(mask.not());
+    }
+  }
+
+  /**
    * Calculate the size of an object using its mark bits
    * @param object The Object
    */
@@ -603,6 +642,15 @@ import org.vmmagic.unboxed.Word;
     }
 
     return (count << LOG_BYTES_IN_WORD);
+  }
+
+  /**
+   * Return the alignment requirement for the object passed
+   * @param object The Object
+   */
+  public static int getObjectAlignmentFromBitmap(ObjectReference object) {
+    boolean doubleAligned = alignmentBitSet(VM.objectModel.objectStartRef(object));
+    return (doubleAligned ? 2 : 1) * Constants.BYTES_IN_WORD;
   }
 
   /**
@@ -668,6 +716,21 @@ import org.vmmagic.unboxed.Word;
   protected static boolean hashBitSet(Address address) {
     Address liveWord = getLiveWordAddress(address);
     Address hashWord = liveWord.plus(LIVE_BYTES_PER_CHUNK); // advance by extent of live bitmap
+    Word mask = getMask(address, true);
+    Word value = hashWord.loadWord();
+    return value.and(mask).EQ(mask);
+  }
+
+  /**
+   * Test the alignment bit for a given address
+   *
+   * @param address The address whose alignment bit is to be tested.
+   * @return {@code true} if the hash bit for this address is set.
+   */
+  @Inline
+  protected static boolean alignmentBitSet(Address address) {
+    Address liveWord = getLiveWordAddress(address);
+    Address hashWord = liveWord.plus(LIVE_BYTES_PER_CHUNK + ALIGNMENT_BYTES_PER_CHUNK); // advance by extent of live + alignment bitmap
     Word mask = getMask(address, true);
     Word value = hashWord.loadWord();
     return value.and(mask).EQ(mask);

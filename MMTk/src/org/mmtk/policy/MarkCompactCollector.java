@@ -452,8 +452,13 @@ public final class MarkCompactCollector {
 
           // Fake - allocate it.
           int size = MarkCompactSpace.getObjectSizeFromBitmap(current);
-          int align = VM.objectModel.getAlignWhenCopied(current);
+          int align = MarkCompactSpace.getObjectAlignmentFromBitmap(current);
+
+          // No need to replace getAlignOffsetWhenCopied because due to combination of
+          // ADDRESS_BASED_HASHING && DYNAMIC_HASH_OFFSET under MC, object is actually
+          // never directly accessed. Only a static offset is returned
           int offset = VM.objectModel.getAlignOffsetWhenCopied(current);
+
           // Move to the (aligned) start of the next object
           toCursor.incTo(Allocator.alignAllocationNoFill(toCursor.get(), align, offset));
 
