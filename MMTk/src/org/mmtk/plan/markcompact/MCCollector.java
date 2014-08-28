@@ -89,6 +89,7 @@ public class MCCollector extends StopTheWorldCollector {
     }
 
     if (phaseId == MC.CALCULATE_FP) {
+      mc.createOffsetTable();
       mc.calculateForwardingPointers();
       return;
     }

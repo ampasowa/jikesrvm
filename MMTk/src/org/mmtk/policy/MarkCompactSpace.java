@@ -12,11 +12,14 @@
  */
 package org.mmtk.policy;
 
+import java.util.ArrayList;
+
 import org.mmtk.plan.TraceLocal;
 import org.mmtk.plan.TransitiveClosure;
 import org.mmtk.utility.Constants;
 import org.mmtk.utility.Conversions;
 import org.mmtk.utility.Log;
+import org.mmtk.utility.alloc.Allocator;
 import org.mmtk.utility.alloc.BumpPointer;
 import org.mmtk.utility.alloc.EmbeddedMetaData;
 import org.mmtk.utility.heap.FreeListPageResource;
@@ -56,13 +59,36 @@ import org.vmmagic.unboxed.Word;
   private static final int LOG_LIVE_COVERAGE = LOG_BIT_COVERAGE + LOG_BITS_IN_BYTE;
   private static final Word WORD_SHIFT_MASK = Word.one().lsh(LOG_BITS_IN_WORD).minus(Extent.one());
 
+  public static final int SCALAR_HEADER_WORDS = 3;
+  public static final int ARRAY_HEADER_WORDS = 4;
+  public static final int SCALAR_HEADER_BYTES = SCALAR_HEADER_WORDS << LOG_BYTES_IN_WORD;
+  public static final int ARRAY_HEADER_BYTES = ARRAY_HEADER_WORDS << LOG_BYTES_IN_WORD;
+
   public static final int LOG_LIVE_BYTES_PER_CHUNK = LOG_BYTES_IN_CHUNK - LOG_LIVE_COVERAGE;
   public static final int LIVE_BYTES_PER_CHUNK = 1 << LOG_LIVE_BYTES_PER_CHUNK; // Live bitmap
   public static final int HASH_BYTES_PER_CHUNK = LIVE_BYTES_PER_CHUNK; // Hash bitmap -- same space requirements as live bitmap
   public static final int ALIGNMENT_BYTES_PER_CHUNK = LIVE_BYTES_PER_CHUNK; // Alignment bitmap -- same space requirements as live bitmap
-  public static final int META_DATA_BYTES_PER_CHUNK = LIVE_BYTES_PER_CHUNK + HASH_BYTES_PER_CHUNK + ALIGNMENT_BYTES_PER_CHUNK;
+  public static final int BITMAP_BYTES_PER_CHUNK = LIVE_BYTES_PER_CHUNK + HASH_BYTES_PER_CHUNK + ALIGNMENT_BYTES_PER_CHUNK;
+
+  public static final int BLOCK_SIZE = 512; // 256 Bytes = 64 Words of actual data -> 64 bits in bitmap = 2 words
+  public static final int INITIAL_CHUNK_DATA_SIZE = (1 << LOG_BYTES_IN_CHUNK) - BITMAP_BYTES_PER_CHUNK;
+  public static final int ADJUSTED_CHUNK_DATA_SIZE = (BLOCK_SIZE * INITIAL_CHUNK_DATA_SIZE) / (BLOCK_SIZE + BYTES_IN_ADDRESS);
+  public static final int ADJUSTED_CHUNK_DATA_SIZE_ALIGNED = Conversions.pageAlign(ADJUSTED_CHUNK_DATA_SIZE);
+  public static final int OFFSET_TABLE_SIZE = INITIAL_CHUNK_DATA_SIZE - ADJUSTED_CHUNK_DATA_SIZE_ALIGNED;
+  public static final int OFFSET_TABLE_NUM_ENTRIES = OFFSET_TABLE_SIZE / BYTES_IN_ADDRESS;
+  private static final Word BLOCK_MASK = Word.fromIntSignExtend(BLOCK_SIZE - 1);
+
+  public static final int BYTES_PER_BITMAP_WORD = BYTES_IN_WORD << LOG_LIVE_COVERAGE;
+  public static final int WORDS_PER_BITMAP_BLOCK = BLOCK_SIZE / BYTES_PER_BITMAP_WORD;
+  public static final int BYTES_PER_DATA_WORD = BYTES_IN_WORD;
+  public static final int WORDS_PER_DATA_BLOCK = BLOCK_SIZE / BYTES_PER_DATA_WORD;
+
+  public static final int META_DATA_BYTES_PER_CHUNK = BITMAP_BYTES_PER_CHUNK + OFFSET_TABLE_SIZE;
   public static final Extent META_DATA_EXTENT_PER_CHUNK = Extent.fromIntSignExtend(META_DATA_BYTES_PER_CHUNK);
   protected static final int META_DATA_PAGES_PER_CHUNK = Conversions.bytesToPages(META_DATA_EXTENT_PER_CHUNK);
+
+  private static final int HASH_OFFSET = LIVE_BYTES_PER_CHUNK;
+  private static final int ALIGNMENT_OFFSET = HASH_OFFSET + HASH_BYTES_PER_CHUNK;
 
   /**
    *
@@ -240,6 +266,248 @@ import org.vmmagic.unboxed.Word;
     return isMarked(object);
   }
 
+  /**
+   * Stores the given forwarding address in the offset table
+   *
+   * @param blockNumber The block number in which to store the address.
+   * @param address     The forwarding address to be stored
+   */
+  public static void storeOffsetTableFwdAddr(int blockNumber, Address address, Address metaDataBase, boolean overwrite) {
+    Address block = offsetTableBlockAddress(metaDataBase, blockNumber);
+    if (!overwrite && !block.loadAddress().isZero()) {
+      if (blockNumber == 0) {
+        Log.writeln("No-op for storeOffsetTableFwdAddress. We already have an entry");
+      }
+      return;
+    }
+    if (blockNumber == 0) {
+      Log.write("Storing in offset table. metaDataBase: "); Log.write(metaDataBase);
+      Log.write(". Block: "); Log.write(blockNumber);
+      Log.write(". Location: "); Log.write(block);
+      Log.write(". Fwd Address: "); Log.writeln(address);
+    }
+    block.store(address);
+  }
+
+  public static Address getOffsetTableFwdAddr(int blockNumber, Address address, Address metaDataBase) {
+    Address block = offsetTableBlockAddress(metaDataBase, blockNumber);
+    Address ret = block.loadAddress();
+    return ret;
+  }
+
+  /**
+   * Returns the address of the location corresponding to the given block number passed
+   *
+   * @param block         The block number for which the address is required
+   * @param metaDataBase  Metadata base address
+   */
+  private static Address offsetTableBlockAddress(Address metaDataBase, int block) {
+    int blockOffset = block << LOG_BYTES_IN_WORD;
+    Address offsetTableBase = metaDataBase.plus(BITMAP_BYTES_PER_CHUNK);
+    return offsetTableBase.plus(blockOffset);
+  }
+
+  /**
+   * Gets the block number for a given object
+   *
+   * @param address The address of the object
+   */
+  public static int getBlockNumber(Address address) {
+    Address base = EmbeddedMetaData.getMetaDataBase(address).plus(META_DATA_EXTENT_PER_CHUNK);
+    return address.diff(base).toInt() / BLOCK_SIZE;
+  }
+
+  public static Address getBlockAddress(Address objAddress) {
+    return objAddress.toWord().and(BLOCK_MASK.not()).toAddress();
+  }
+
+  public static Address getNewAddress(ObjectReference object, boolean verbose) {
+    Address fromObjStart = VM.objectModel.objectStartRef(object);
+    Address fromObjEnd = getObjectEndAddress(object);
+    Address fromBlockStartAddress = getBlockAddress(fromObjStart);
+    Address fromBlockEndAddress = fromBlockStartAddress.plus(BLOCK_SIZE);
+
+    Address metaDataBase = EmbeddedMetaData.getMetaDataBase(fromObjStart);
+    int objectSize = fromObjEnd.diff(fromObjStart).toInt() + BYTES_IN_WORD;
+    int objectAlignment = MarkCompactSpace.getObjectAlignmentFromBitmap(object);
+    int objectOffset = MarkCompactSpace.getObjectOffsetFromBitmap(object);
+    boolean objectHashed = MarkCompactSpace.hashBitSet(object);
+    int reservedSize = objectSize;
+    if (objectHashed)
+      reservedSize += BYTES_IN_WORD;
+
+    int blockNumber = getBlockNumber(fromObjStart);
+    Address toBlockBaseAddress = getOffsetTableFwdAddr(blockNumber, fromBlockStartAddress, metaDataBase);
+    verbose = false;
+    if (blockNumber == 0)
+      verbose = true;
+
+    if (verbose) {
+      Log.writeln("**********************************************************************");
+      Log.write("objAddress: "); Log.write(fromObjStart);
+      Log.write(". metaDataBase: "); Log.write(metaDataBase);
+      Log.write(". toBlockBaseAddr: "); Log.writeln(toBlockBaseAddress);
+      Log.write("blockNumber: "); Log.write(blockNumber);
+      Log.write(". fromBlockStart: "); Log.write(fromBlockStartAddress);
+      Log.write(". fromBlockEnd: "); Log.writeln(fromBlockEndAddress);
+    }
+
+    Address regionBase = MarkCompactLocal.getRegionBase(toBlockBaseAddress);
+    Address regionLimit = MarkCompactLocal.getRegionLimit(regionBase);
+    Address regionDataStart = MarkCompactLocal.getDataStart(regionBase);
+
+    Address cursor = toBlockBaseAddress;
+    if (cursor.LT(regionDataStart)){
+      cursor = cursor.plus(MarkCompactLocal.DATA_START_OFFSET);
+    }
+
+    // get total size of live data between block start and object start
+    Address bitmapBlockStart = getLiveWordAddress(fromBlockStartAddress);
+    int wordsBeforeObject = fromObjStart.diff(fromBlockStartAddress).toInt() >> LOG_BYTES_IN_WORD;
+
+    Address current = bitmapBlockStart;
+    Word mask = Word.one();
+    int ticker = 0;
+    int objectStartTick = 0;
+    int offset = 0;
+    int align = BYTES_IN_WORD;
+
+    boolean isLive = false;
+    boolean isHashed = false;
+    boolean isDoubleAligned = false;
+    boolean ignoreFirstLiveBit = false;
+    boolean startMarker = true;
+
+    // Do a first pass through block to determine number of live bits in total
+    int numLiveBits = getTotalLiveBits(bitmapBlockStart, wordsBeforeObject);
+    if (numLiveBits % 2 != 0) {
+      // We have an odd number of live marks. Therefore, the first one is likely
+      // to be the end marker of an object from the previous block. We must
+      // ignore this marked bit before proceeding
+      ignoreFirstLiveBit = true;
+    }
+
+    if (verbose) {
+      Log.write("regionBase: "); Log.write(regionBase);
+      Log.write(". regionLimit: "); Log.write(regionLimit);
+      Log.write(". regionDataStart: "); Log.writeln(regionDataStart);
+      Log.write("bitmapBlockStartAddr: "); Log.write(bitmapBlockStart);
+      Log.write(". wordsBeforeObject: "); Log.write(wordsBeforeObject);
+      Log.write(". numLiveBits: "); Log.writeln(numLiveBits);
+    }
+
+    while(ticker < wordsBeforeObject) {
+      Word value = current.loadWord();
+      isLive = value.and(mask).EQ(mask);
+
+      if (isLive) {
+        if (ignoreFirstLiveBit) {
+          ignoreFirstLiveBit = false;
+        } else {
+          // normal path
+          if (startMarker) {
+            // start bit
+            // First get the ticker value to mark beginning of object
+            objectStartTick = ticker;
+
+            // Check hash bit value
+            Word hashValue = current.plus(HASH_OFFSET).loadWord();
+            isHashed = hashValue.and(mask).EQ(mask);
+
+            // Get alignment value
+            Word alignValue = current.plus(ALIGNMENT_OFFSET).loadWord();
+            isDoubleAligned = alignValue.and(mask).EQ(mask);
+            align = (isDoubleAligned ? 2 : 1) * BYTES_IN_WORD;
+
+          } else {
+            // end bit
+            // First get offset requirement
+            Word offsetStatus = current.plus(HASH_OFFSET).loadWord();
+            if (offsetStatus.and(mask).EQ(mask)) {
+              Word offsetType = current.plus(ALIGNMENT_OFFSET).loadWord();
+              boolean isArray = offsetType.and(mask).EQ(mask);
+              offset = isArray ? ARRAY_HEADER_BYTES : SCALAR_HEADER_BYTES;
+            } else {
+              offset = 0;
+            }
+
+            // Align cursor appropriately
+            cursor = Allocator.alignAllocationNoFill(cursor, align, offset);
+
+            // Add single word to object size if it has been hashed
+            int size = (ticker - objectStartTick + 1) << Constants.LOG_BYTES_IN_WORD;
+            size += (isHashed) ? BYTES_IN_WORD : 0;
+
+            Address testCursor = cursor.plus(size);
+            Address alignedTestCursor = Allocator.alignAllocationNoFill(testCursor, align, offset);
+            if (!alignedTestCursor.LE(regionLimit)) {
+              regionBase = MarkCompactLocal.getNextRegion(regionBase);
+              regionLimit = MarkCompactLocal.getRegionLimit(regionBase);
+              cursor = MarkCompactLocal.getDataStart(regionBase);
+
+              // Re-align cursor appropriately
+              cursor = Allocator.alignAllocationNoFill(cursor, align, offset);
+            }
+
+            cursor = cursor.plus(size);
+          }
+          startMarker = !startMarker;
+        }
+      }
+
+      mask = mask.lsh(1);
+      if (mask.EQ(Word.zero())) {
+        mask = Word.one();
+        current = current.plus(BYTES_IN_WORD);
+      }
+
+      ticker++;
+    }
+
+    // Test if adding object size to cursor moves us beyond region limit
+    // If so, then move cursor into next region
+    Address testCursor = cursor.plus(reservedSize);
+    Address alignedTestCursor = Allocator.alignAllocationNoFill(testCursor, objectAlignment, objectOffset);
+    if (!alignedTestCursor.LE(regionLimit)) {
+      regionBase = MarkCompactLocal.getNextRegion(regionBase);
+      regionLimit = MarkCompactLocal.getRegionLimit(regionBase);
+      cursor = MarkCompactLocal.getDataStart(regionBase);
+    }
+
+    // Re-align cursor appropriately
+    cursor = Allocator.alignAllocationNoFill(cursor, objectAlignment, objectOffset);
+    if (verbose) {
+      Log.write("finalAddress: "); Log.writeln(cursor);
+    }
+    return cursor;
+  }
+
+  private static int getTotalLiveBits(Address start, int limit) {
+    int ticker = 0;
+    int liveBits = 0;
+    Word mask = Word.one();
+    boolean isLive = false;
+    Address current = start;
+
+    while(ticker < limit) {
+      Word value = current.loadWord();
+      isLive = value.and(mask).EQ(mask);
+
+      if (isLive) {
+        liveBits++;
+      }
+
+      mask = mask.lsh(1);
+      if (mask.EQ(Word.zero())) {
+        mask = Word.one();
+        current = current.plus(BYTES_IN_WORD);
+      }
+
+      ticker++;
+    }
+
+    return liveBits;
+  }
 
   /****************************************************************************
    *
@@ -472,6 +740,19 @@ import org.vmmagic.unboxed.Word;
       updateAlignmentBit(objectStartAddress, false, true);
     }
 
+    // We use a secondary bit in the hash bit vector to indicate whether the offset is non-zero
+    // A non-zero offset mean that we will use a secondary bit in the align bit vector to
+    // indicate whether the object is a scalar or an array.
+    int offset = VM.objectModel.getAlignOffsetWhenCopied(object);
+    if (offset == SCALAR_HEADER_BYTES) {
+      // Switch on offset status and set offsetValue to scalar, which in this case is a no-op
+      updateHashBit(objectEndAddress, true, true);
+    } else if (offset == ARRAY_HEADER_BYTES) {
+      // Switch on offset status and set offsetValue to array, by flipping bit on
+      updateHashBit(objectEndAddress, true, true);
+      updateAlignmentBit(objectEndAddress, true, true);
+    }
+
     if (VM.VERIFY_ASSERTIONS) {
       VM.assertions._assert(liveBitSet(objectStartAddress));
       VM.assertions._assert(liveBitSet(objectEndAddress));
@@ -654,6 +935,19 @@ import org.vmmagic.unboxed.Word;
   }
 
   /**
+   * Return the alignment offset requirements for a copy of this object
+   * @param object The Object
+   */
+  public static int getObjectOffsetFromBitmap(ObjectReference object) {
+    Address objectEndAddress = getObjectEndAddress(object);
+    if (hashBitSet(objectEndAddress)) {
+      return alignmentBitSet(objectEndAddress) ? ARRAY_HEADER_BYTES : SCALAR_HEADER_BYTES;
+    } else {
+      return 0;
+    }
+  }
+
+  /**
    * Test the live bit for a given object
    *
    * @param object The object whose live bit is to be set.
@@ -795,7 +1089,7 @@ import org.vmmagic.unboxed.Word;
    * @return The address of the live word for this object
    */
   @Inline
-  private static Address getLiveWordAddress(Address address) {
+  public static Address getLiveWordAddress(Address address) {
     Address rtn = EmbeddedMetaData.getMetaDataBase(address);
     return rtn.plus(EmbeddedMetaData.getMetaDataOffset(address,
         LOG_LIVE_COVERAGE, LOG_BYTES_IN_WORD));

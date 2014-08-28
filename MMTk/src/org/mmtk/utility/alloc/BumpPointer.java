@@ -88,7 +88,7 @@ import org.vmmagic.unboxed.Word;
   protected static final Offset DATA_END_OFFSET = NEXT_REGION_OFFSET.plus(BYTES_IN_ADDRESS);
 
   // Data must start particle-aligned.
-  protected static final Offset DATA_START_OFFSET = alignAllocationNoFill(
+  public static final Offset DATA_START_OFFSET = alignAllocationNoFill(
       Address.zero().plus(DATA_END_OFFSET.plus(BYTES_IN_ADDRESS)),
       MIN_ALIGNMENT, 0).toWord().toOffset();
   protected static final Offset MAX_DATA_START_OFFSET = alignAllocationNoFill(
@@ -454,6 +454,11 @@ import org.vmmagic.unboxed.Word;
   public static boolean isRegionAligned(Address region) {
     if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(!region.isZero());
     return region.toWord().and(BLOCK_MASK).isZero();
+  }
+
+  public static Address getRegionBase(Address address) {
+    if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(!address.isZero());
+    return address.toWord().and(BLOCK_MASK.not()).toAddress();
   }
 
   /**

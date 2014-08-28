@@ -17,12 +17,14 @@ import org.mmtk.utility.Constants;
 import org.mmtk.utility.Log;
 import org.mmtk.utility.alloc.Allocator;
 import org.mmtk.utility.alloc.BumpPointer;
+import org.mmtk.utility.alloc.EmbeddedMetaData;
 import org.mmtk.vm.VM;
 import org.vmmagic.pragma.Inline;
 import org.vmmagic.pragma.Uninterruptible;
 import org.vmmagic.unboxed.Address;
 import org.vmmagic.unboxed.Extent;
 import org.vmmagic.unboxed.ObjectReference;
+import org.vmmagic.unboxed.Word;
 
 /**
  * This class implements unsynchronized (local) per-collector-thread elements of a
@@ -46,7 +48,12 @@ import org.vmmagic.unboxed.ObjectReference;
 @Uninterruptible
 public final class MarkCompactCollector {
 
+  private static final int HASH_OFFSET = MarkCompactSpace.LIVE_BYTES_PER_CHUNK;
+  private static final int ALIGNMENT_OFFSET = HASH_OFFSET + MarkCompactSpace.HASH_BYTES_PER_CHUNK;
+
   static final boolean VERBOSE = false;
+
+  static final boolean TMP_VERBOSE = false;
 
   static final boolean VERY_VERBOSE = VERBOSE && false;
 
@@ -199,6 +206,44 @@ public final class MarkCompactCollector {
       }
     }
 
+    void advanceToNextChunk(MarkCompactSpace space) {
+      Address oldChunkBase = EmbeddedMetaData.getMetaDataBase(cursor);
+      while (EmbeddedMetaData.getMetaDataBase(cursor).EQ(oldChunkBase)) {
+        Address nextRegion = BumpPointer.getNextRegion(region);
+        if (nextRegion.isZero()) {
+          nextRegion = space.getNextRegion();
+          if (nextRegion.isZero()) {
+            region = Address.zero();
+            return;
+          }
+          MarkCompactLocal.setNextRegion(region,nextRegion);
+          MarkCompactLocal.clearNextRegion(nextRegion);
+        }
+        init(nextRegion);
+      }
+      if (VM.VERIFY_ASSERTIONS) assertCursorInBounds();
+    }
+
+    /**
+     * Advance the cursor either to the next region in the list,
+     * or to a new region allocated from the global list.
+     * @param space
+     */
+    void advanceToNextForwardableRegion(MarkCompactSpace space) {
+      Address nextRegion = BumpPointer.getNextRegion(region);
+      if (nextRegion.isZero()) {
+        nextRegion = space.getNextRegion();
+        if (nextRegion.isZero()) {
+          region = Address.zero();
+          return;
+        }
+        MarkCompactLocal.setNextRegion(region,nextRegion);
+        MarkCompactLocal.clearNextRegion(nextRegion);
+      }
+      init(nextRegion);
+      if (VM.VERIFY_ASSERTIONS) assertCursorInBounds();
+    }
+
     /**
      * @return {@code true} if we haven't advanced beyond the end of the region list
      */
@@ -274,27 +319,6 @@ public final class MarkCompactCollector {
     }
 
     /**
-     * Advance the cursor either to the next region in the list,
-     * or to a new region allocated from the global list.
-     * @param space
-     */
-    void advanceToNextForwardableRegion(MarkCompactSpace space) {
-      if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(get().EQ(getLimit()));
-      Address nextRegion = BumpPointer.getNextRegion(region);
-      if (nextRegion.isZero()) {
-        nextRegion = space.getNextRegion();
-        if (nextRegion.isZero()) {
-          region = Address.zero();
-          return;
-        }
-        MarkCompactLocal.setNextRegion(region,nextRegion);
-        MarkCompactLocal.clearNextRegion(nextRegion);
-      }
-      init(nextRegion);
-      if (VM.VERIFY_ASSERTIONS) assertCursorInBounds();
-    }
-
-    /**
      * Override the superclass with an additional assertion - we only advance
      * when we have read to the end, and the cursor must point *precisely*
      * to the last allocated byte in the region.
@@ -303,6 +327,17 @@ public final class MarkCompactCollector {
     void advanceToNextRegion() {
       if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(get().EQ(getLimit()));
       super.advanceToNextRegion();
+    }
+
+    /**
+     * Advance the cursor either to the next region in the list,
+     * or to a new region allocated from the global list.
+     * @param space
+     */
+    @Override
+    void advanceToNextForwardableRegion(MarkCompactSpace space) {
+      if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(get().EQ(getLimit()));
+      super.advanceToNextForwardableRegion(space);
     }
 
     /**
@@ -453,11 +488,7 @@ public final class MarkCompactCollector {
           // Fake - allocate it.
           int size = MarkCompactSpace.getObjectSizeFromBitmap(current);
           int align = MarkCompactSpace.getObjectAlignmentFromBitmap(current);
-
-          // No need to replace getAlignOffsetWhenCopied because due to combination of
-          // ADDRESS_BASED_HASHING && DYNAMIC_HASH_OFFSET under MC, object is actually
-          // never directly accessed. Only a static offset is returned
-          int offset = VM.objectModel.getAlignOffsetWhenCopied(current);
+          int offset = MarkCompactSpace.getObjectOffsetFromBitmap(current);
 
           // Move to the (aligned) start of the next object
           toCursor.incTo(Allocator.alignAllocationNoFill(toCursor.get(), align, offset));
@@ -479,6 +510,32 @@ public final class MarkCompactCollector {
             toCursor.incTo(Allocator.alignAllocationNoFill(toCursor.get(), align, offset));
           }
 
+          // Get new address using compressor, and compare with ordinary MC-calculated address
+          // Assert that they're equal before proceeding
+          Address forwardAddress = MarkCompactSpace.getNewAddress(current, true);
+          if (!toCursor.get().EQ(forwardAddress)) {
+            Log.writeln();
+            Log.writeln("**************************************************************************");
+            MarkCompactSpace.getNewAddress(current, true);
+            Address objAdr = VM.objectModel.objectStartRef(current);
+            Address fromBlockStartAddress = MarkCompactSpace.getBlockAddress(objAdr);
+            Address metaDataBase = EmbeddedMetaData.getMetaDataBase(objAdr);
+            int blockNumber = MarkCompactSpace.getBlockNumber(objAdr);
+            Address toBlockBaseAddress = MarkCompactSpace.getOffsetTableFwdAddr(blockNumber, fromBlockStartAddress, metaDataBase);
+
+            Log.write("Compressor Fwd Addr: "); Log.write(forwardAddress);
+            Log.write(". Ordinary MC Fwd Addr: "); Log.writeln(toCursor.get());
+            Log.write("Object: "); Log.write(objAdr);
+            Log.write(". Size: "); Log.write(reservedSize);
+            Log.write(". Align: "); Log.write(align);
+            Log.write(". Offset: "); Log.writeln(offset);
+            Log.write("Block: "); Log.write(blockNumber);
+            Log.write(". Block (offset) Addr: "); Log.writeln(toBlockBaseAddress);
+            Log.writeln("**************************************************************************");
+          }
+          if (VM.VERIFY_ASSERTIONS)
+            VM.assertions._assert(forwardAddress.EQ(toCursor.get()));
+
           ObjectReference target = VM.objectModel.getReferenceWhenCopiedTo(current, toCursor.get());
           if (toCursor.sameRegion(fromCursor) && target.toAddress().GE(current.toAddress())) {
             // Don't move the object.
@@ -494,6 +551,140 @@ public final class MarkCompactCollector {
     }
   }
 
+  /**
+   * Creates offset table from the markbit vector
+   */
+  public void createOffsetTable() {
+    if (regions.isZero()) {
+      regions = space.getNextRegion();
+    }
+
+    if (regions.isZero())
+      return;
+
+    fromCursor.init(regions);
+    toCursor.init(regions);
+
+    while (fromCursor.isValid()) {
+      Log.writeln("--------------------------------------------------------------------------");
+      fromCursor.print();
+      toCursor.print();
+
+      Address livemapStart = MarkCompactSpace.getLiveWordAddress(fromCursor.get());
+      Address metadataStart = EmbeddedMetaData.getMetaDataBase(fromCursor.get());
+      Address livemapEnd = metadataStart.plus(MarkCompactSpace.LIVE_BYTES_PER_CHUNK);
+      Address currentAddress = livemapStart;
+      Word mask = Word.one();
+
+      int wordCounter = 0;
+      int block = 0;
+      int bitCounter = 0;
+      int offset = 0;
+      int align = Constants.BYTES_IN_WORD;
+
+      boolean isLive = false;
+      boolean isHashed = false;
+      boolean isDoubleAligned = false;
+
+      // startMarker denotes whether we're looking at object start/end mark bit
+      // it is initially set to true, so it is satisfied upon seeing first start bit
+      boolean startMarker = true;
+
+      // flag is set to true between the time we encounter the start marker and when
+      // we encounter end marker.
+      boolean middleOfObject = false;
+      boolean writeToOffsetTableWaiting = false;
+
+      MarkCompactSpace.storeOffsetTableFwdAddr(block, toCursor.get(), metadataStart, false);
+
+      while (currentAddress.LE(livemapEnd)) {
+        Word value = currentAddress.loadWord();
+        isLive = value.and(mask).EQ(mask);
+
+        if (isLive) {
+          if (startMarker) {
+            // Start of object.
+            // First Reset bit counter
+            bitCounter = 1;
+            middleOfObject = true;
+
+            // Check hash bit because offset corresponds only to start marker
+            Word hashValue = currentAddress.plus(HASH_OFFSET).loadWord();
+            isHashed = hashValue.and(mask).EQ(mask);
+
+            // Same as above
+            Word alignValue = currentAddress.plus(ALIGNMENT_OFFSET).loadWord();
+            isDoubleAligned = alignValue.and(mask).EQ(mask);
+            align = (isDoubleAligned ? 2 : 1) * Constants.BYTES_IN_WORD;
+
+            if (TMP_VERBOSE) {
+              Log.write("Block: "); Log.write(block);
+              Log.write(". Live Word address: "); Log.write(currentAddress);
+            }
+          } else {
+            // End of object.
+            // First get offset requirement
+            Word offsetStatus = currentAddress.plus(HASH_OFFSET).loadWord();
+            if (offsetStatus.and(mask).EQ(mask)) {
+              Word offsetType = currentAddress.plus(ALIGNMENT_OFFSET).loadWord();
+              boolean isArray = offsetType.and(mask).EQ(mask);
+              offset = isArray ? MarkCompactSpace.ARRAY_HEADER_BYTES : MarkCompactSpace.SCALAR_HEADER_BYTES;
+            } else {
+              offset = 0;
+            }
+
+            // Align cursor appropriately
+            toCursor.incTo(Allocator.alignAllocationNoFill(toCursor.get(), align, offset));
+
+            // Add single word to object size if it has been hashed
+            // We assume it is always going to move. This is simpler, and also because we
+            // cannot easily calculate its original location to determine whether moving
+            // is necessary. Therefore it's much simpler to just always "move" it.
+            int size = bitCounter << Constants.LOG_BYTES_IN_WORD;
+            size += (isHashed) ? Constants.BYTES_IN_WORD : 0;
+
+            if (!toCursor.isAvailable(size)) {
+              // The 'to' pointer always trails the 'from' pointer, guaranteeing that
+              // there's a next region to advance to.
+              toCursor.advanceToNextForwardableRegion(space);
+              toCursor.incTo(Allocator.alignAllocationNoFill(toCursor.get(), align, offset));
+            }
+
+            if (TMP_VERBOSE) {
+              Log.write(". Forward address: "); Log.write(toCursor.get());
+              Log.write(". Size: "); Log.write(size);
+              Log.write(". Align: "); Log.writeln(align);
+            }
+
+            // Increment destination pointer by size of object
+            toCursor.inc(size);
+            middleOfObject = false;
+          }
+          startMarker = !startMarker;
+        }
+
+        mask = mask.lsh(1);
+        if (mask.EQ(Word.zero())) {
+          wordCounter++;
+          mask = Word.one();
+          currentAddress = currentAddress.plus(Constants.BYTES_IN_WORD);
+          if (wordCounter % MarkCompactSpace.WORDS_PER_BITMAP_BLOCK == 0) {
+            // Crossed block boundary
+            block++;
+            writeToOffsetTableWaiting = true;
+          }
+        }
+
+        if (!middleOfObject && writeToOffsetTableWaiting) {
+          MarkCompactSpace.storeOffsetTableFwdAddr(block, toCursor.get(), metadataStart, false);
+          writeToOffsetTableWaiting = false;
+        }
+
+        bitCounter++;
+      }
+      fromCursor.advanceToNextChunk(space);
+    }
+  }
 
   /**
    * Perform the compacting phase of the collection.
