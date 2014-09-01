@@ -477,7 +477,8 @@ import org.vmmagic.unboxed.Word;
     // Re-align cursor appropriately
     cursor = Allocator.alignAllocationNoFill(cursor, objectAlignment, objectOffset);
     if (verbose) {
-      Log.write("finalAddress: "); Log.writeln(cursor);
+      Log.write("finalAddress: "); Log.write(cursor);
+      Log.write(". reservedSize: "); Log.writeln(reservedSize);
     }
     return cursor;
   }

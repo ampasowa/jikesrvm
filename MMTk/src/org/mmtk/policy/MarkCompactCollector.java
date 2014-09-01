@@ -564,11 +564,25 @@ public final class MarkCompactCollector {
 
     fromCursor.init(regions);
     toCursor.init(regions);
+    Address lowWaterMark = fromCursor.get();
 
     while (fromCursor.isValid()) {
       Log.writeln("--------------------------------------------------------------------------");
       fromCursor.print();
       toCursor.print();
+      // Ensure that we never move backward to a region already seen
+      if (fromCursor.get().LT(lowWaterMark)) {
+        if (VM.VERIFY_ASSERTIONS) {
+          // Fail if difference between low water mark and current address is more than 4MB
+          int difference = lowWaterMark.diff(fromCursor.get()).toInt();
+          VM.assertions._assert(difference <= (1 << 22));
+        }
+        Log.writeln("Below low water mark! Advancing to next chunk again...");
+        fromCursor.advanceToNextChunk(space);
+        continue;
+      }
+      // Reset low water mark to newly advanced cursor
+      lowWaterMark = fromCursor.get();
 
       Address livemapStart = MarkCompactSpace.getLiveWordAddress(fromCursor.get());
       Address metadataStart = EmbeddedMetaData.getMetaDataBase(fromCursor.get());
