@@ -275,16 +275,7 @@ import org.vmmagic.unboxed.Word;
   public static void storeOffsetTableFwdAddr(int blockNumber, Address address, Address metaDataBase, boolean overwrite) {
     Address block = offsetTableBlockAddress(metaDataBase, blockNumber);
     if (!overwrite && !block.loadAddress().isZero()) {
-      if (blockNumber == 0) {
-        Log.writeln("No-op for storeOffsetTableFwdAddress. We already have an entry");
-      }
       return;
-    }
-    if (blockNumber == 0) {
-      Log.write("Storing in offset table. metaDataBase: "); Log.write(metaDataBase);
-      Log.write(". Block: "); Log.write(blockNumber);
-      Log.write(". Location: "); Log.write(block);
-      Log.write(". Fwd Address: "); Log.writeln(address);
     }
     block.store(address);
   }
@@ -337,10 +328,8 @@ import org.vmmagic.unboxed.Word;
       reservedSize += BYTES_IN_WORD;
 
     int blockNumber = getBlockNumber(fromObjStart);
-    Address toBlockBaseAddress = getOffsetTableFwdAddr(blockNumber, fromBlockStartAddress, metaDataBase);
     verbose = false;
-    if (blockNumber == 0)
-      verbose = true;
+    Address toBlockBaseAddress = getOffsetTableFwdAddr(blockNumber, fromBlockStartAddress, metaDataBase);
 
     if (verbose) {
       Log.writeln("**********************************************************************");
@@ -478,8 +467,28 @@ import org.vmmagic.unboxed.Word;
     cursor = Allocator.alignAllocationNoFill(cursor, objectAlignment, objectOffset);
     if (verbose) {
       Log.write("finalAddress: "); Log.write(cursor);
+      Log.write(". Align: "); Log.write(objectAlignment);
+      Log.write(". Offset: "); Log.write(objectOffset);
+      Log.write(". Hashed: "); Log.write(objectHashed);
       Log.write(". reservedSize: "); Log.writeln(reservedSize);
     }
+    if (regionBase.EQ(MarkCompactLocal.getRegionBase(fromObjStart)) && cursor.GT(fromObjStart)) {
+      // If corrected address is an offset table address, replace stored address with correct one
+      if (cursor.EQ(toBlockBaseAddress)) {
+        if (verbose) {
+          Log.writeln("Replacing stored forwarding address");
+        }
+        storeOffsetTableFwdAddr(blockNumber, fromObjStart, metaDataBase, true);
+      }
+
+      // Ensure forwarding address does not lead object address if they are in same region
+      cursor = fromObjStart;
+
+      if (verbose) {
+        Log.write("finalAddress after adjustment: "); Log.writeln(cursor);
+      }
+    }
+
     return cursor;
   }
 
@@ -509,6 +518,32 @@ import org.vmmagic.unboxed.Word;
 
     return liveBits;
   }
+
+  public static int getTotalLiveBits(Address start, Address end) {
+    int liveBits = 0;
+    Word mask = Word.one();
+    boolean isLive = false;
+    Address current = start;
+
+    while(current.LE(end)) {
+      Word value = current.loadWord();
+      isLive = value.and(mask).EQ(mask);
+
+      if (isLive) {
+        liveBits++;
+      }
+
+      mask = mask.lsh(1);
+      if (mask.EQ(Word.zero())) {
+        mask = Word.one();
+        current = current.plus(BYTES_IN_WORD);
+      }
+
+    }
+
+    return liveBits;
+  }
+
 
   /****************************************************************************
    *
@@ -1077,7 +1112,7 @@ import org.vmmagic.unboxed.Word;
    * @return The appropriate bit mask for object for the live table for.
    */
   @Inline
-  private static Word getMask(Address address, boolean set) {
+  public static Word getMask(Address address, boolean set) {
     int shift = address.toWord().rshl(OBJECT_LIVE_SHIFT).and(WORD_SHIFT_MASK).toInt();
     Word rtn = Word.one().lsh(shift);
     return (set) ? rtn : rtn.not();

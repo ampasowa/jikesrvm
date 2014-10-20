@@ -53,7 +53,7 @@ public final class MarkCompactCollector {
 
   static final boolean VERBOSE = false;
 
-  static final boolean TMP_VERBOSE = false;
+  static boolean TMP_VERBOSE = false;
 
   static final boolean VERY_VERBOSE = VERBOSE && false;
 
@@ -340,6 +340,11 @@ public final class MarkCompactCollector {
       super.advanceToNextForwardableRegion(space);
     }
 
+    void advanceToNextForwardableRegionNoCheck(MarkCompactSpace space) {
+      if (VM.VERIFY_ASSERTIONS) VM.assertions._assert(get().LE(getLimit()));
+      super.advanceToNextForwardableRegion(space);
+    }
+
     /**
      * @return {@code true} if there are more objects in this region
      */
@@ -510,33 +515,15 @@ public final class MarkCompactCollector {
             toCursor.incTo(Allocator.alignAllocationNoFill(toCursor.get(), align, offset));
           }
 
+          ObjectReference target = VM.objectModel.getReferenceWhenCopiedTo(current, toCursor.get());
+
           // Get new address using compressor, and compare with ordinary MC-calculated address
           // Assert that they're equal before proceeding
           Address forwardAddress = MarkCompactSpace.getNewAddress(current, true);
-          if (!toCursor.get().EQ(forwardAddress)) {
-            Log.writeln();
-            Log.writeln("**************************************************************************");
-            MarkCompactSpace.getNewAddress(current, true);
-            Address objAdr = VM.objectModel.objectStartRef(current);
-            Address fromBlockStartAddress = MarkCompactSpace.getBlockAddress(objAdr);
-            Address metaDataBase = EmbeddedMetaData.getMetaDataBase(objAdr);
-            int blockNumber = MarkCompactSpace.getBlockNumber(objAdr);
-            Address toBlockBaseAddress = MarkCompactSpace.getOffsetTableFwdAddr(blockNumber, fromBlockStartAddress, metaDataBase);
 
-            Log.write("Compressor Fwd Addr: "); Log.write(forwardAddress);
-            Log.write(". Ordinary MC Fwd Addr: "); Log.writeln(toCursor.get());
-            Log.write("Object: "); Log.write(objAdr);
-            Log.write(". Size: "); Log.write(reservedSize);
-            Log.write(". Align: "); Log.write(align);
-            Log.write(". Offset: "); Log.writeln(offset);
-            Log.write("Block: "); Log.write(blockNumber);
-            Log.write(". Block (offset) Addr: "); Log.writeln(toBlockBaseAddress);
-            Log.writeln("**************************************************************************");
-          }
           if (VM.VERIFY_ASSERTIONS)
             VM.assertions._assert(forwardAddress.EQ(toCursor.get()));
 
-          ObjectReference target = VM.objectModel.getReferenceWhenCopiedTo(current, toCursor.get());
           if (toCursor.sameRegion(fromCursor) && target.toAddress().GE(current.toAddress())) {
             // Don't move the object.
             MarkCompactSpace.setForwardingPointer(current, current);
@@ -564,34 +551,23 @@ public final class MarkCompactCollector {
 
     fromCursor.init(regions);
     toCursor.init(regions);
-    Address lowWaterMark = fromCursor.get();
 
     while (fromCursor.isValid()) {
-      Log.writeln("--------------------------------------------------------------------------");
-      fromCursor.print();
-      toCursor.print();
-      // Ensure that we never move backward to a region already seen
-      if (fromCursor.get().LT(lowWaterMark)) {
-        if (VM.VERIFY_ASSERTIONS) {
-          // Fail if difference between low water mark and current address is more than 4MB
-          int difference = lowWaterMark.diff(fromCursor.get()).toInt();
-          VM.assertions._assert(difference <= (1 << 22));
-        }
-        Log.writeln("Below low water mark! Advancing to next chunk again...");
-        fromCursor.advanceToNextChunk(space);
-        continue;
-      }
-      // Reset low water mark to newly advanced cursor
-      lowWaterMark = fromCursor.get();
-
-      Address livemapStart = MarkCompactSpace.getLiveWordAddress(fromCursor.get());
       Address metadataStart = EmbeddedMetaData.getMetaDataBase(fromCursor.get());
-      Address livemapEnd = metadataStart.plus(MarkCompactSpace.LIVE_BYTES_PER_CHUNK);
+      int block = MarkCompactSpace.getBlockNumber(fromCursor.get());
+      Address livemapStart = MarkCompactSpace.getLiveWordAddress(fromCursor.get());
+      Address livemapEnd = MarkCompactSpace.getLiveWordAddress(fromCursor.getLimit());
+      if (livemapEnd.diff(livemapStart).toInt() > 1024) {
+        livemapEnd = livemapStart.plus(1024);
+      }
+
       Address currentAddress = livemapStart;
-      Word mask = Word.one();
+      Word startMask = MarkCompactSpace.getMask(fromCursor.get(), true);
+      Word endMask = MarkCompactSpace.getMask(fromCursor.getLimit(), true);
+      Word mask = startMask; //Word.one();
+      int liveBitsInRegion = MarkCompactSpace.getTotalLiveBits(livemapStart, livemapEnd);
 
       int wordCounter = 0;
-      int block = 0;
       int bitCounter = 0;
       int offset = 0;
       int align = Constants.BYTES_IN_WORD;
@@ -609,9 +585,13 @@ public final class MarkCompactCollector {
       boolean middleOfObject = false;
       boolean writeToOffsetTableWaiting = false;
 
-      MarkCompactSpace.storeOffsetTableFwdAddr(block, toCursor.get(), metadataStart, false);
+      MarkCompactSpace.storeOffsetTableFwdAddr(block, toCursor.get(), metadataStart, true);
 
       while (currentAddress.LE(livemapEnd)) {
+        // Do not scan last address in live bitmap more than needed
+        if (currentAddress.EQ(livemapEnd) && mask.EQ(endMask))
+          break;
+
         Word value = currentAddress.loadWord();
         isLive = value.and(mask).EQ(mask);
 
@@ -660,18 +640,30 @@ public final class MarkCompactCollector {
             if (!toCursor.isAvailable(size)) {
               // The 'to' pointer always trails the 'from' pointer, guaranteeing that
               // there's a next region to advance to.
+              if (TMP_VERBOSE) {
+                Log.write("No space in to region for object of size: "); Log.writeln(size);
+                toCursor.print();
+                Log.writeln("Advancing to next forwardable region");
+              }
               toCursor.advanceToNextForwardableRegion(space);
               toCursor.incTo(Allocator.alignAllocationNoFill(toCursor.get(), align, offset));
             }
 
             if (TMP_VERBOSE) {
               Log.write(". Forward address: "); Log.write(toCursor.get());
+              Log.write(". Hashed: "); Log.write(isHashed);
               Log.write(". Size: "); Log.write(size);
               Log.write(". Align: "); Log.writeln(align);
             }
 
             // Increment destination pointer by size of object
             toCursor.inc(size);
+
+            // Immediately move into next region if we're at the end of current region after advancing
+            if (toCursor.get().EQ(toCursor.getLimit())) {
+              toCursor.advanceToNextForwardableRegion(space);
+            }
+
             middleOfObject = false;
           }
           startMarker = !startMarker;
@@ -685,6 +677,9 @@ public final class MarkCompactCollector {
           if (wordCounter % MarkCompactSpace.WORDS_PER_BITMAP_BLOCK == 0) {
             // Crossed block boundary
             block++;
+            if (block == 1408) {
+              int v = 5;
+            }
             writeToOffsetTableWaiting = true;
           }
         }
@@ -696,7 +691,7 @@ public final class MarkCompactCollector {
 
         bitCounter++;
       }
-      fromCursor.advanceToNextChunk(space);
+      fromCursor.advanceToNextForwardableRegionNoCheck(space);
     }
   }
 
